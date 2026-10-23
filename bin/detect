@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -f "${1:?Build directory required}/.env.schema" ]] || exit 1
+echo 'Varlock schema preparation'

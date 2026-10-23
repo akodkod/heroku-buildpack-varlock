@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+build="$fixture/build directory"
+env_dir="$fixture/env"
+mkdir -p "$build/api/lib" "$env_dir" "$fixture/cache"
+printf 'api\n' > "$env_dir/PROJECT_PATH"
+printf '# generated\n' > "$build/api/lib/env_schema.rb"
+cat > "$build/.env.schema" <<'SCHEMA'
+# @currentEnv=$VARLOCK_ENV
+# @defaultRequired=false
+# @plugin(varlock-sorbet)
+# @generateSorbetEnv(path=api/lib/env_schema.rb, filter="#api")
+# ---
+# @tag(api) @required @sensitive @type=string
+EXAMPLE_SECRET=
+# @tag(api) @type=boolean
+ENABLED=false
+SCHEMA
+printf 'EXAMPLE_SECRET=must-not-copy\n' > "$build/.env"
+printf 'EXAMPLE_SECRET=also-private\n' > "$build/.env.production"
+"$root/bin/detect" "$build"
+"$root/bin/compile" "$build" "$fixture/cache" "$env_dir"
+expected="$fixture/expected"
+sed '/^# @plugin(varlock-sorbet)$/d; /^# @generateSorbetEnv(/d' "$build/.env.schema" > "$expected"
+cmp "$expected" "$build/api/config/varlock/.env.schema"
+[[ $(find "$build/api/config/varlock" -type f | wc -l | tr -d ' ') == 1 ]]
+"$root/bin/compile" "$build" "$fixture/cache" "$env_dir"
+cmp "$expected" "$build/api/config/varlock/.env.schema"
+# Simulate promotion by the following subdir buildpack
+mkdir "$fixture/slug"
+cp -R "$build/api/." "$fixture/slug/"
+cmp "$expected" "$fixture/slug/config/varlock/.env.schema"
+[[ -f "$fixture/slug/lib/env_schema.rb" ]]
+for invalid in '' /tmp .. missing; do
+  printf '%s' "$invalid" > "$env_dir/PROJECT_PATH"
+  if "$root/bin/compile" "$build" "$fixture/cache" "$env_dir" 2>/dev/null; then
+    echo 'Expected invalid PROJECT_PATH to fail' >&2
+    exit 1
+  fi
+done
+printf 'api' > "$env_dir/PROJECT_PATH"
+rm "$build/api/lib/env_schema.rb"
+if "$root/bin/compile" "$build" "$fixture/cache" "$env_dir" 2>/dev/null; then
+  echo 'Expected missing generated code to fail' >&2
+  exit 1
+fi
+rm "$build/.env.schema"
+if "$root/bin/detect" "$build"; then exit 1; fi
+"$root/bin/release" "$build" > "$fixture/release.yml"
+echo 'All buildpack tests passed'

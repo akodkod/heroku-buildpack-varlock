@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+build_dir=$(cd "${1:?Build directory required}" && pwd -P)
+env_dir=${3:?Environment directory required}
+
+fail() {
+  echo " !     $1" >&2
+  exit 1
+}
+
+[[ -f "$env_dir/PROJECT_PATH" ]] || fail 'Set PROJECT_PATH to the application subdirectory'
+project_path=$(cat "$env_dir/PROJECT_PATH")
+case "$project_path" in
+  ''|/*) fail 'PROJECT_PATH must be a relative subdirectory' ;;
+esac
+[[ -d "$build_dir/$project_path" ]] || fail 'PROJECT_PATH does not exist'
+app_dir=$(cd "$build_dir/$project_path" && pwd -P)
+case "$app_dir" in
+  "$build_dir"/*) ;;
+  *) fail 'PROJECT_PATH must stay inside the build directory' ;;
+esac
+[[ -f "$build_dir/.env.schema" ]] || fail 'Root .env.schema is missing'
+[[ -f "$app_dir/lib/env_schema.rb" ]] || fail 'Commit the generated lib/env_schema.rb before deploying'
+
+# Resolve existing symlinks before writing the deployment copy
+mkdir -p "$app_dir/config/varlock"
+destination=$(cd "$app_dir/config/varlock" && pwd -P)
+case "$destination" in
+  "$app_dir"/*) ;;
+  *) fail 'Schema destination must stay inside the application' ;;
+esac
+[[ ! -L "$destination/.env.schema" ]] || fail 'Schema destination must not be a symlink'
+
+echo '-----> Preparing Varlock runtime schema'
+# These two standalone directives only generate committed Sorbet code
+# Keep every variable and validation decorator unchanged
+umask 077
+temporary=$(mktemp "$destination/.schema.XXXXXX")
+trap 'rm -f "$temporary"' EXIT
+awk '
+  /^[[:space:]]*#[[:space:]]*@plugin\(varlock-sorbet\)[[:space:]]*$/ { next }
+  /^[[:space:]]*#[[:space:]]*@generateSorbetEnv\(.*\)[[:space:]]*$/ { next }
+  { print }
+' "$build_dir/.env.schema" > "$temporary"
+mv "$temporary" "$destination/.env.schema"
+echo '       Runtime schema saved to config/varlock/.env.schema'
